@@ -1,3 +1,5 @@
+# 自包含版 v2：仓库里只需要这一个文件
+# 关键改动：sw.js 的内容绑定构建指纹 —— 官方一变，浏览器必然装新 SW、抓新包、自动刷新
 name: 抓取官方更新并部署
 
 on:
@@ -24,8 +26,145 @@ jobs:
         with:
           node-version: '20'
 
-      - name: 抓官方最新包并处理
-        run: node upload/tools/build.mjs --unlock --noindex --out ../dist
+      - name: 生成构建脚本并运行
+        run: |
+          cat > build.js <<'EOF'
+          /* 自包含构建 v2：SW 内容绑定构建指纹，官方一变就强制换新 */
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const OUT = 'dist';
+          fs.mkdirSync(OUT, { recursive: true });
+          
+          (async () => {
+            const res = await fetch('https://ember-rift.pages.dev/', {
+              headers: { 'user-agent': 'ember-offline-ci' },
+              redirect: 'follow',
+            });
+            if (!res.ok) throw new Error('下载失败 HTTP ' + res.status);
+            let html = await res.text();
+            const bytes = Buffer.byteLength(html, 'utf8');
+            console.log('下载 ' + bytes.toLocaleString() + ' 字节');
+            if (bytes < 3e6) throw new Error('内容太小，可能不是游戏页');
+            if (!html.includes('state:"title"')) throw new Error('游戏本体特征缺失');
+          
+            // 构建指纹：官方内容一变，SW 内容跟着变 → 浏览器必然装新 SW → 强制刷新缓存
+            const BUILD = crypto.createHash('sha256').update(html, 'utf8').digest('hex').slice(0, 12);
+            console.log('构建指纹 ' + BUILD);
+          
+            const before = bytes;
+            html = html.replace(/<!-- Cloudflare Pages Analytics -->[\s\S]*?<!-- Cloudflare Pages Analytics -->/g, '');
+            html = html.replace(/<script[^>]*cloudflareinsights[^>]*>\s*<\/script>/g, '');
+            console.log('剥离统计 -' + (before - Buffer.byteLength(html, 'utf8')));
+          
+            const petShape = /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)=>!!([A-Za-z_$][\w$]*)\[\2\]&&\(!!\3\[\2\]\.free\|\|!!\(([A-Za-z_$][\w$]*)&&\(\4\.pets\|\|\[\]\)\.includes\(\2\)\)\)/;
+            const pet = html.match(petShape);
+            if (pet) {
+              html = html.replace(pet[0], pet[1] + '=' + pet[2] + '=>!!' + pet[3] + '[' + pet[2] + ']');
+              console.log('全解锁: 宠物 ok (' + pet[1] + ')');
+            } else console.log('全解锁: 宠物形状未匹配');
+          
+            const cosShape = /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{return!([A-Za-z_$][\w$]*)\|\|!([A-Za-z_$][\w$]*)\(\2\)\[\3\]\?!1:[^}]*\}/;
+            const cos = html.match(cosShape);
+            if (cos) {
+              html = html.replace(cos[0], 'function ' + cos[1] + '(' + cos[2] + ',' + cos[3] + '){return!' + cos[4] + '||!' + cos[5] + '(' + cos[2] + ')[' + cos[3] + ']?!1:!0}');
+              console.log('全解锁: 外观 ok (' + cos[1] + ')');
+            } else console.log('全解锁: 外观形状未匹配');
+          
+            // 注册片段：不用手动点，SW 换新后自动重载一次
+            const REG = `<!-- 离线支持 build:${BUILD} -->
+          <script>
+          (function () {
+            if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+            var hadController = !!navigator.serviceWorker.controller;
+            var reloaded = false;
+            navigator.serviceWorker.addEventListener('controllerchange', function () {
+              if (hadController && !reloaded) { reloaded = true; location.reload(); }
+            });
+            navigator.serviceWorker.register('./sw.js', { scope: './' }).then(function (reg) {
+              setInterval(function () { try { reg.update(); } catch (e) {} }, 10 * 60 * 1000);
+              document.addEventListener('visibilitychange', function () {
+                if (document.visibilityState === 'visible') { try { reg.update(); } catch (e) {} }
+              });
+            }).catch(function () {});
+          })();
+          </script>`;
+          
+            const SW = `const BUILD='${BUILD}';
+          const V='er-'+BUILD;
+          const SHELL=['./','./index.html','./manifest.webmanifest'];
+          self.addEventListener('install',e=>e.waitUntil((async()=>{
+            const c=await caches.open(V);
+            for(const u of SHELL){try{await c.add(new Request(new URL(u,self.location.href),{cache:'reload'}))}catch(_){}}
+            await self.skipWaiting();
+          })()));
+          self.addEventListener('activate',e=>e.waitUntil((async()=>{
+            const ks=await caches.keys();
+            await Promise.all(ks.filter(k=>k!==V).map(k=>caches.delete(k)));
+            await self.clients.claim();
+          })()));
+          self.addEventListener('fetch',e=>{
+            const r=e.request;
+            if(r.method!=='GET')return;
+            let u;try{u=new URL(r.url)}catch(_){return}
+            if(u.origin!==self.location.origin)return;
+            if(r.mode==='navigate'){e.respondWith((async()=>{
+              const c=await caches.open(V);
+              const hit=(await c.match(r))||(await c.match('./index.html'))||(await c.match('./'));
+              if(hit)return hit;
+              try{const res=await fetch(r);if(res.ok)await c.put('./index.html',res.clone());return res}
+              catch(_){return new Response('离线且无缓存',{status:503})}
+            })())}else{
+              e.respondWith((async()=>{
+                const c=await caches.open(V);
+                const hit=await c.match(r);if(hit)return hit;
+                try{const res=await fetch(r);if(res.ok&&res.type==='basic')await c.put(r,res.clone());return res}catch(_){return new Response('',{status:504})}
+              })())
+            }
+          });
+          self.addEventListener('message',e=>{const d=e.data;const t=typeof d==='string'?d:(d&&d.type);if(t==='SKIP_WAITING')self.skipWaiting()});`;
+          
+            if (!html.includes("register('./sw.js'")) {
+              const i = html.lastIndexOf('</body>');
+              html = i < 0 ? html + REG : html.slice(0, i) + REG + '\n' + html.slice(i);
+              console.log('注入 SW 注册');
+            }
+          
+            const icons = [];
+            const dirs = ['.', 'upload/static', 'static'];
+            const find = (f) => dirs.map((d) => d + '/' + f).find((p) => fs.existsSync(p));
+            for (const [f, s] of [['icon-192.png', '192x192'], ['icon-512.png', '512x512']]) {
+              const p = find(f);
+              if (p) { fs.copyFileSync(p, OUT + '/' + f); icons.push({ src: f, sizes: s, type: 'image/png' }); console.log('图标 ' + f + ' ← ' + p); }
+            }
+            const ati = find('apple-touch-icon.png');
+            if (ati) { fs.copyFileSync(ati, OUT + '/apple-touch-icon.png'); console.log('图标 apple-touch-icon.png ← ' + ati); }
+          
+            fs.writeFileSync(OUT + '/index.html', html);
+            fs.writeFileSync(OUT + '/sw.js', SW);
+            fs.writeFileSync(OUT + '/manifest.webmanifest', JSON.stringify({
+              name: '余烬裂隙', short_name: '余烬裂隙', lang: 'zh-CN',
+              start_url: './', scope: './', display: 'standalone',
+              orientation: 'landscape', background_color: '#09080b', theme_color: '#09080b',
+              icons: icons
+            }, null, 2));
+            fs.writeFileSync(OUT + '/.nojekyll', '');
+            fs.writeFileSync(OUT + '/robots.txt', 'User-agent: *\nDisallow: /\n');
+          
+            const outBytes = Buffer.byteLength(html, 'utf8');
+            const checks = [
+              ['游戏本体完整', html.includes('state:"title"')],
+              ['只有一处 SW 注册', (html.match(/register\('\.\/sw\.js'/g) || []).length === 1],
+              ['统计已剥离', !html.includes('cloudflareinsights')],
+              ['SW 绑定指纹', SW.includes(BUILD)],
+              ['包体 > 3MB', outBytes > 3e6],
+            ];
+            let bad = 0;
+            for (const [k, ok] of checks) { console.log((ok ? '✓ ' : '✗ ') + k); if (!ok) bad++; }
+            if (bad) { console.error(bad + ' 项自检失败'); process.exit(1); }
+            console.log('构建完成 ' + (outBytes / 1048576).toFixed(2) + ' MB · build ' + BUILD);
+          })();
+          EOF
+          node build.js
 
       - uses: actions/upload-pages-artifact@v3
         with:
