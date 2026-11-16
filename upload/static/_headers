@@ -1,0 +1,17 @@
+# Cloudflare Pages 响应头（Netlify 请改名 _headers 同样生效；其它平台可忽略）
+# 关键：sw.js 必须每次都回源校验，否则新版 SW 永远不生效。
+/sw.js
+  Cache-Control: no-cache
+  Service-Worker-Allowed: /
+
+/index.html
+  Cache-Control: no-cache
+
+/
+  Cache-Control: no-cache
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=3600
+
+/*.png
+  Cache-Control: public, max-age=604800

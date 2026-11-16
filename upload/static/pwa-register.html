@@ -1,0 +1,96 @@
+<!-- ===== 离线 / PWA 支持（自托管注入，官方站没有这段） ===== -->
+<script>
+(function () {
+  try {
+    if (!('serviceWorker' in navigator)) return;
+    if (location.protocol === 'file:') return; // file:// 不能注册 SW
+
+    var box = null;
+    var pendingReload = false;
+
+    function toast(msg, onClick) {
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+      box = document.createElement('div');
+      box.textContent = msg;
+      box.style.cssText = [
+        'position:fixed',
+        'left:50%',
+        'transform:translateX(-50%)',
+        'bottom:calc(env(safe-area-inset-bottom, 0px) + 16px)',
+        'z-index:2147483647',
+        'padding:11px 18px',
+        'border-radius:999px',
+        'font:600 14px/1.25 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif',
+        'color:#f7e8c8',
+        'background:rgba(26,17,10,.94)',
+        'border:1px solid rgba(255,170,80,.5)',
+        'box-shadow:0 8px 26px rgba(0,0,0,.5)',
+        '-webkit-tap-highlight-color:transparent',
+        'user-select:none',
+        onClick ? 'cursor:pointer' : 'pointer-events:none'
+      ].join(';');
+      if (onClick) {
+        box.addEventListener('click', function () {
+          try { onClick(); } catch (e) {}
+        });
+      }
+      (document.body || document.documentElement).appendChild(box);
+      setTimeout(function () {
+        if (box && box.parentNode) box.parentNode.removeChild(box);
+        box = null;
+      }, 20000);
+    }
+
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (pendingReload) location.reload();
+    });
+
+    navigator.serviceWorker
+      .register('./sw.js', { scope: './' })
+      .then(function (reg) {
+        function offer(worker) {
+          toast('有新版本，点此刷新', function () {
+            pendingReload = true;
+            worker.postMessage({ type: 'SKIP_WAITING' });
+          });
+        }
+
+        // 已经装好了但在等激活
+        if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
+
+        // 本次开着页面时后台装上了新版本
+        reg.addEventListener('updatefound', function () {
+          var w = reg.installing;
+          if (!w) return;
+          w.addEventListener('statechange', function () {
+            if (w.state === 'installed' && navigator.serviceWorker.controller) offer(w);
+          });
+        });
+
+        // 后台校验发现官方包变了
+        navigator.serviceWorker.addEventListener('message', function (e) {
+          if (e.data === 'shell-updated') {
+            toast('有新版本，点此刷新', function () { location.reload(); });
+          }
+        });
+
+        // 前台每 30 分钟主动查一次更新
+        setInterval(function () {
+          try { reg.update(); } catch (e) {}
+        }, 30 * 60 * 1000);
+
+        // 暴露一个手动入口，方便调试：window.__erOffline.update()
+        window.__erOffline = {
+          reg: reg,
+          update: function () { return reg.update(); },
+          clear: function () {
+            return navigator.serviceWorker.controller &&
+              navigator.serviceWorker.controller.postMessage({ type: 'CLEAR' });
+          }
+        };
+      })
+      .catch(function () { /* 注册失败就退回普通网页，不影响游戏 */ });
+  } catch (e) {}
+})();
+</script>
+<!-- ===== 离线 / PWA 支持 end ===== -->
