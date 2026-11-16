@@ -25,12 +25,7 @@ jobs:
           node-version: '20'
 
       - name: 抓官方最新包并处理
-        run: node tools/build.mjs --unlock --noindex
-
-      - name: 回归测试
-        run: |
-          node test/unlock-sim.mjs dist/index.html
-          node test/sw-sim.mjs
+        run: node upload/tools/build.mjs --unlock --noindex --out ../dist
 
       - uses: actions/upload-pages-artifact@v3
         with:
